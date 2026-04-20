@@ -1,0 +1,363 @@
+---
+title: "Modeling Memory in Cells"
+author: "Ben Ridenhour"
+date: "January 2026"
+output: 
+  html_document:
+     toc: true
+     mathjax: "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(pomp)
+library(ggplot2)
+library(tidyr)
+```
+
+# Basic Model
+
+Okay, the first pass at this should simply consist of two types of cells. The first will be "unexposed" $U$ cells which have not experienced some stressor. The second type of cells will be "memory" $M$ cells that have been exposed. The key difference between the two cell types will be their growth rates in the presence of the stressor. Note that I will use the general consideration that $r(t) = b(t)-d(t)$, i.e., that the growth rate is the difference of the birth and death rates. We could consider separating the birth and death processes at some later time. I will use a carrying capacity. (QUESTION: Should cells in the memory class be born into the memory class? That is how I will set this up initially but I'm hesitant about this assumption.)
+
+With respect to memory, I will assume that the conversion rate ($\beta$) is a function of the intensity $\iota(t)$ of the stressor such that $\beta = f(\iota)$. I will also assume that there is some baseline conversion rate between the two type, but that the forward and reverse conversion rate are equivalent such that $\mu = \mu_f = \mu_r$ (note that I am thinking of $\mu$ as a traditional mutation rate). Lastly, I will assume that cells stay in the memory class for a period time that is given by $\epsilon^{-1}$ which is also some function of the intensity of the stressor, $\epsilon = g(\iota)$. In comparison to $\mu$, $\epsilon$ represents some non-genetic type of switching between phenotypes. 
+
+This leads to the system of equations:
+
+\begin{align} \label{eqn:basic}
+ \frac{dU}{dt} & = r_U(t)(1-U(t)-M(t)) U(t) - \beta(t) U(t) - \mu (U(t) - M(t)) + \epsilon(t) M(t) \\
+ \frac{dM}{dt} & = r_M(t)(1-U(t)-M(t)) M(t) + \beta(t) U(t) - \mu (M(t) - U(t)) - \epsilon(t) M(t).
+\end{align}
+
+## No stressor, fixed cost
+
+The first case is just a sanity check to make sure that everything is working okay. For this case, let $r_M = c r_0$ where $0 <c < 1$ is a cost associated with whatever physiological change is being made in the memory cells and $r_U(t)=r_0$ is a constant, and let $\iota(t) = 0$ (i.e., no stressors). In this case, let $\beta(t)=0$ (no forced gain of memory) an let $\epsilon(t) = \epsilon_0$ which is a constant representing how quickly memory is lost when no stressor is present. In this simplified scenario:
+
+\begin{align} \label{eqn:nostress}
+ \frac{dU}{dt} & = r_0(1-U(t)-M(t)) U(t)  - \mu (U(t) - M(t)) + \epsilon_0 M(t) \\
+ \frac{dM}{dt} & = c r_0(1-U(t)-M(t)) M(t)  - \mu (M(t) - U(t)) - \epsilon_0 M(t).
+\end{align}
+
+<a id="no-stress-eq"></a>This leads to the equilibrium set $\{U^* = 0, M^* = 0\}$ (trivial), $c M^* + U^* = 0$ where $M^* = \frac{\epsilon + \mu + c(\mu-r)}{(c-1)c r}$ which is not feasible because it implies either $U^*$ or $M^* < 0$, and lastly $U^* + M^* = 1$ such that $M^* = \frac{\mu}{\epsilon + 2\mu}$. Linearization of the system at evaluation at the non-trivial equilibrium point yields the Jacobian
+
+$$\mathbf{J}(U^*,M^*)=\begin{bmatrix}-\mu -\frac{r (\mu +\epsilon )}{2 \mu +\epsilon } & \mu -\frac{r (\mu +\epsilon )}{2 \mu +\epsilon }+\epsilon \\ \mu -\frac{c \mu  r}{2 \mu +\epsilon } & \mu  \left(-\frac{c r}{2 \mu +\epsilon }-1\right)-\epsilon \end{bmatrix}$$
+Which has eigenvalues $\lambda_1=-(\epsilon + 2\mu)$ and $\lambda_2=-\frac{r(\epsilon + \mu + c \mu)}{\epsilon + 2\mu}$, which are both negative indicating this equilbrium is stable. Note that $\epsilon >> \mu$ (or so I would assume), so the speed at which the equilbrium is achieved is primarily driven by  $\epsilon$, the duration that memory is retained.
+
+### Dynamics
+
+Let's simulate the system and make sure it conforms to expecations.
+
+```{r basic pomp}
+
+#defining the ODE system
+memstep <- function(U, M, c, r, mu, eps, sigma, delta.t, ...){
+  dW_U <- rnorm(1, sd=sqrt(delta.t))
+  dW_M <- rnorm(1, sd=sqrt(delta.t))
+  c(U = U + (r*(1-U-M)*U - mu*(U-M) + eps*M)*delta.t + sigma*U*dW_U,
+    M = M + (c*r*(1-U-M)*M - mu*(M-U) - eps*M)*delta.t + sigma*M*dW_M)
+}
+
+#creating the simulation pomp object; no measurement error
+memory <- simulate(
+  times = 1:72, t0 = 0,
+  params = c(r = 0.5, c = 0.75, mu = 0.00001, eps = 1/24, sigma = 0.1, U_0 = 0.001, M_0 = 0.000001),
+  rinit = function(U_0,M_0,...){
+    c(U=U_0, M=M_0)
+  },
+  rprocess = euler(memstep, delta.t = 1/60)
+)
+
+M_star <- 0.00001/(2*0.00001+1/24)
+
+ggplot(data=pivot_longer(as(memory,"data.frame"),-time),
+  aes(x=time,y=value,color=name)) + scale_y_log10() + 
+  geom_line() + geom_hline(aes(yintercept = M_star), col = "green", lty = 2, lwd =1)
+
+```
+
+This looks fairly reasonable for a first pass. Now let's do multiple realizations:
+
+```{r multisim simple}
+sims <- simulate(memory, nsim = 20)
+
+ggplot(data=pivot_longer(
+         as.data.frame(sims),
+         c(U,M)
+       ),
+  aes(x=time,y=value,color=name,
+    group=interaction(.L1,name))) + 
+  scale_y_log10() + 
+  geom_line() + geom_hline(aes(yintercept = M_star), col = "green", lty = 2, lwd =1)
+
+```
+
+This system behaves as expected. QUESTION: Does this match the basic biology of the cells?
+
+
+# Periodic regime shift with stress
+
+Now let's focus the model on a scenario where the stress happens for fixed periods. Define $\mathcal{S}$ to be the set of times where a stressor is present and $\mathcal{N} \in \mathbb{R}^+ \setminus \mathcal{S}$ as the set of times without a stressor present.  To do this, I will first use a period long-enough that 2 quasi-equilibria should exist. The first of those equilibria corresponds to the stress-free equilibrium from the previous section. The second equilibrium
+
+This leads to the system of equations:
+
+\begin{align} \label{eqn:periodicstress}
+ \frac{dU}{dt} & = r_U(t)(1-U(t)-M(t)) U(t) - \beta(t) U(t) - \mu (U(t) - M(t)) + \epsilon(t) M(t) \\
+ \frac{dM}{dt} & = r_M(t)(1-U(t)-M(t)) M(t) + \beta(t) U(t) - \mu (M(t) - U(t)) - \epsilon(t) M(t).
+\end{align}
+
+I will assume that:
+
+  - $\epsilon$ is still independent of the environment (i.e., that non-genetic memory decays at a constant rate);
+
+  - $\beta(t) = \iota \beta$ where $\iota \in \{0,1\}$ and $\iota = 1$ if $t \in \mathcal{S}$ and $\iota = 0$ if not;
+
+  - and lastly, $r_U(t) = (1 - \iota \alpha )r_0$ with constraint $\alpha > 1 - c$ (which enforces a lower growth rate for type $U$ in stress conditions).
+
+ 
+
+```{r stress}
+
+memstep_stress <- function(U, M, c, alpha, r, mu, eps, beta, sigma, t, delta.t, ...){
+  dW_U <- rnorm(1, sd=sqrt(delta.t))
+  dW_M <- rnorm(1, sd=sqrt(delta.t))
+  iota <- ((t + delta.t) %/% 8) %% 2 # change stress regime every 8 hours
+  c(U = U + ((1-iota*alpha)*r*(1-U-M)*U - mu*(U-M) + eps*M - iota*beta*U)*delta.t + sigma*U*dW_U,
+    M = M + (c*r*(1-U-M)*M - mu*(M-U) - eps*M + iota*beta*U)*delta.t + sigma*M*dW_M)
+}
+
+#creating the simulation pomp object; no measurement error
+memory_stress <- simulate(
+  times = 1:72, t0 = 0,
+  params = c(r = 0.5, c = 0.75, alpha = 0.5, mu = 0.00001, eps = 1/24, beta = 0.1, sigma = 0.1, U_0 = 0.001, M_0 = 0.000001),
+  rinit = function(U_0, M_0, ...){
+    c(U=U_0, M=M_0)
+  },
+  rprocess = euler(memstep_stress, delta.t = 1/60)
+)
+```
+
+Okay, the above code works, but it is a bit hacky. I will need to think about how to make this more elegant.
+
+```{r multisim stress}
+sims <- simulate(memory_stress, nsim = 20)
+
+stress_bands <- local({
+  vals <- ((1:72 %/% 8) %% 2)
+  r <- rle(vals)
+  ends <- cumsum(r$lengths)
+  starts <- c(1, ends[-length(ends)] + 1)
+  data.frame(xmin = starts - 0.5,
+             xmax = ends + 0.5,
+             state = ifelse(r$values == 1, "Stress", "No stress"))
+})
+
+ggplot(data=pivot_longer(
+         as.data.frame(sims),
+         c(U,M)
+       ),
+  aes(x=time,y=value,color=name,
+    group=interaction(.L1,name))) + theme_bw() +
+  geom_rect(data = stress_bands,
+            aes(xmin = xmin, xmax = xmax, fill = state),
+            ymin = -Inf, ymax = Inf,
+            inherit.aes = FALSE, alpha = 0.3) +
+  scale_fill_manual(name = NULL, values = c("Stress" = "grey70", "No stress" = "transparent")) +
+  scale_y_log10() +
+  geom_line() + geom_hline(aes(yintercept = M_star), col = "green", lty = 2, lwd =1) 
+
+```
+
+It looks like the system is behaving as I would naively expect: When stress appears, the memory cells become the dominant form and then they decay under periods of no stress. Obviously, the dynamics in this system are highly depedent on:
+
+  - Parameter values
+  - Environmental regimes (periods of stress versus no-stress)
+
+
+For the conditions described above we get a new set of stationary points. If $t \notin \mathcal{S}$, we just get the [same points](#no-stress-eq) as described in the model where there is no stress. However, we get a new non-trivial equilibrium where $U^*_\mathcal{S} = 1 - M^*_\mathcal{S}$ and $M^*_\mathcal{S} = \frac{\beta + \mu}{\beta + 2\mu + \epsilon}$. Note that our new equilibrium value $M$ fits intuition, such that $\underset{\beta\rightarrow\infty}{\lim} M^*_\mathcal{S} = 1$, and if $\beta = 0$ then $M^*_\mathcal{S} = M^*$. 
+
+TO-DO: Look at the Jacobian and evaluate the new equilibrium. It should be stable.
+
+## Slower regime shifts, faster decay
+
+```{r alt stress}
+
+#based on mu = 0.00001, eps = 1/8
+no_stress_eq_M <- 0.00001/(2*0.00001+1/8)
+stress_eq_M <-  (0.00001 + 0.01)/(0.01 + 2*0.00001 + 1/8)
+
+#24 hr shifts in regime
+memstep_stress_24 <- function(U, M, c, alpha, r, mu, eps, beta, sigma, t, delta.t, ...){
+  dW_U <- rnorm(1, sd=sqrt(delta.t))
+  dW_M <- rnorm(1, sd=sqrt(delta.t))
+  iota <- ((t + delta.t) %/% 24) %% 2 # change stress regime every 8 hours
+  c(U = U + ((1-iota*alpha)*r*(1-U-M)*U - mu*(U-M) + eps*M - iota*beta*U)*delta.t + sigma*U*dW_U,
+    M = M + (c*r*(1-U-M)*M - mu*(M-U) - eps*M + iota*beta*U)*delta.t + sigma*M*dW_M)
+}
+
+#changing run time to 96 hrs
+#starting at no stress equilibrium
+memory_stress_24 <- simulate(
+  times = 1:96, t0 = 0,
+  params = c(r = 0.5, c = 0.75, alpha = 0.5, mu = 0.00001, eps = 1/8, beta = 0.01, sigma = 0.1, U_0 = 1 - no_stress_eq_M, M_0 = no_stress_eq_M),
+  rinit = function(U_0, M_0, ...){
+    c(U=U_0, M=M_0)
+  },
+  rprocess = euler(memstep_stress_24, delta.t = 1/60)
+)
+
+sims_24 <- simulate(memory_stress_24, nsim = 20)
+
+stress_bands_24 <- local({
+  vals <- ((1:96 %/% 24) %% 2)
+  r <- rle(vals)
+  ends <- cumsum(r$lengths)
+  starts <- c(1, ends[-length(ends)] + 1)
+  data.frame(xmin = starts - 0.5,
+             xmax = ends + 0.5,
+             state = ifelse(r$values == 1, "Stress", "No stress"))
+})
+
+ggplot(data=pivot_longer(
+         as.data.frame(sims_24),
+         c(U,M)
+       ),
+  aes(x=time,y=value,color=name,
+    group=interaction(.L1,name))) + theme_bw() +
+  geom_rect(data = stress_bands_24,
+            aes(xmin = xmin, xmax = xmax, fill = state),
+            ymin = -Inf, ymax = Inf,
+            inherit.aes = FALSE, alpha = 0.3) +
+  scale_fill_manual(name = NULL, values = c("Stress" = "grey70", "No stress" = "transparent")) +
+  scale_y_log10() +
+  geom_line() + geom_hline(aes(yintercept = no_stress_eq_M), col = "green", lty = 2, lwd =1) +
+  geom_hline(aes(yintercept = stress_eq_M), col = "red", lty = 2, lwd =1)  
+
+```
+
+
+In the above plot, we see that the population sits at the expected equilbrium values until stress is added to the system. Also, as expected, there is an exponential decay of the memory cell population once the stress is removed. Here is a plot of the fraction of the memory cells over time, which might be more informative:
+
+```{r fraction memory plot}
+
+junk <- as.data.frame(sims_24)
+junk$frac <- junk$M/(junk$U + junk$M)
+ggplot(data=junk, aes(x=time, y=frac, group=.L1)) + 
+  geom_line() + theme_bw() + ylab("Population Fraction of M")+
+  geom_rect(data = stress_bands_24,
+            aes(xmin = xmin, xmax = xmax, fill = state),
+            ymin = -Inf, ymax = Inf,
+            inherit.aes = FALSE, alpha = 0.3) +
+  scale_fill_manual(name = NULL, values = c("Stress" = "grey70", "No stress" = "transparent")) 
+```
+
+We can pretty clearly see swings in the compostion of the population with environmental changes in this plot.
+
+# Model with different functional responses
+
+It may be more natural to consider a non-binary response to stress that reflects the level of the stressor in the environment. The somewhat natural way to do this would be using Hill functions. We can express this generically as:
+
+$$\rho(t) = \frac{1}{1 + \left(\frac{\rho_{50}}{s(t)}\right)^n}$$
+
+where $\rho$ is the fraction of the total response, $s$ is amount (concentration?) of the stressor, $\rho_{50}$ defines the value of $s$ at which $\rho = 0.5$, and $n$ is the Hill coefficient. As $n$ increases, the shape of the Hill function changes from diminishing returns, to sigmoidal, to a virtually binary response at large $n$. This leads to a fairly simple modification of the model, such that
+
+This leads to the system of equations:
+
+\begin{align} \label{eqn:continuousstress}
+ \frac{dU}{dt} & = r_U(\rho)(1-U(t)-M(t)) U(t) - \beta(\rho) U(t) - \mu (U(t) - M(t)) + \epsilon(t) M(t) \\
+ \frac{dM}{dt} & = r_M(t)(1-U(t)-M(t)) M(t) + \beta(\rho) U(t) - \mu (M(t) - U(t)) - \epsilon(t) M(t).
+\end{align}
+
+The assumeptions here are:
+
+  - $\epsilon$ is still independent of the environment (i.e., that non-genetic memory decays at a constant rate);
+
+  - $\rho(t)$ is our Hill function;
+
+  - $s(t)$ is some function of the environment that reflects the amount of stressor present at time $t$;
+
+  - and lastly, $r_U(\rho) = (1 - \alpha \rho )r_0$ with constraint $\alpha > 1 - c$ (which enforces a lower growth rate for type $U$ in stress conditions).
+
+
+Note that, as long as $s(t)$ is sufficiently variable in time, this model is unlikely to achieve any non-trivial equilibrium. Instead, the system will likely be in a constant state of flux with the population composition changing as the environment changes. However, it may be interesting to look at the dynamics of this system under different assumptions about $s(t)$ and the Hill coefficient $n$.
+
+
+```{r functional stress}
+
+#based on mu = 0.00001, eps = 1/8
+no_stress_eq_M <- 0.00001/(2*0.00001+1/8)
+stress_eq_M <-  (0.00001 + 0.01)/(0.01 + 2*0.00001 + 1/8)
+
+#24 hr shifts in regime
+memstep_stress_cont <- function(U, M, c, alpha, r, mu, eps, beta, n, rho_50, sigma, t, delta.t, ...){
+  dW_U <- rnorm(1, sd=sqrt(delta.t))
+  dW_M <- rnorm(1, sd=sqrt(delta.t))
+  stress <- sin((t+delta.t)/(24/(2*pi))) + 1/2 # 24 hour period
+  rho <- 1 / (1 + (rho_50/stress)^n)
+  c(U = U + ((1-rho*alpha)*r*(1-U-M)*U - mu*(U-M) + eps*M - rho*beta*U)*delta.t + sigma*U*dW_U,
+    M = M + (c*r*(1-U-M)*M - mu*(M-U) - eps*M + rho*beta*U)*delta.t + sigma*M*dW_M)
+}
+
+#changing run time to 96 hrs
+#starting at no stress equilibrium
+memory_stress_cont <- simulate(
+  times = 1:96, t0 = 0,
+  params = c(r = 0.5, c = 0.75, alpha = 0.5, mu = 0.00001, eps = 1/8, beta = 0.01, n = 2, rho_50 = 0.5, sigma = 0.1, U_0 = 1 - no_stress_eq_M, M_0 = no_stress_eq_M),
+  rinit = function(U_0, M_0, ...){
+    c(U=U_0, M=M_0)
+  },
+  rprocess = euler(memstep_stress_cont, delta.t = 1/60)
+)
+
+sims_cont <- simulate(memory_stress_cont, nsim = 20)
+
+
+ggplot(data=pivot_longer(
+         as.data.frame(sims_cont),
+         c(U,M)
+       ),
+  aes(x=time,y=value,color=name,
+    group=interaction(.L1,name))) + theme_bw() +
+  scale_y_log10() +
+  geom_line() + geom_hline(aes(yintercept = no_stress_eq_M), col = "green", lty = 2, lwd =1) +
+  geom_hline(aes(yintercept = stress_eq_M), col = "red", lty = 2, lwd =1)  
+
+```
+
+## Box Car models
+
+I am not sure that "Box Car" models necessarily fit into this heading/outline section. They could be a broader category that reflect a different biological assumption (that there may be several different underlying---but ordered--states stress response). I could imagine (ASK A BIOLOGIST) this reflecting upregulation of different pathways. Anyway, I will leave this (sub-)section here for now.
+
+# Resource uptake
+
+Planned version where bacteria explicitly compete for resources and stress is dependent on concentration of stressor.
+
+# Measurement error models
+
+# Statistical modeling
+
+# Modeling Background
+
+The model developed here belongs to a well-studied class of two-state phenotypic switching models in microbiology. The core structure — a population split between an "unexposed" type ($U$) and a "memory" type ($M$) with differential growth rates and environment-dependent switching — closely parallels models of bacterial persistence, where cells reversibly switch between normally growing and slow-growing (persister) phenotypes.
+
+The distinction between the genetic switching rate $\mu$ and the non-genetic/epigenetic decay rate $\epsilon$ mirrors a key conceptual division in the literature between heritable epigenetic states (which persist across generations) and transient phenotypic states (which decay when the inducing signal is removed). The responsive switching term $\beta(\iota)$ — where switching is triggered by the environment rather than occurring stochastically — has been shown to have qualitatively different ecological consequences than purely stochastic switching, including different community stabilization properties.
+
+The use of periodic stress regimes (alternating $\mathcal{S}$ and $\mathcal{N}$ periods) is a standard theoretical framework for studying bet-hedging strategies, with the key result from the literature being that an optimal switching rate exists that maximizes long-term geometric mean fitness. The carrying-capacity logistic structure adds density dependence not always present in the simplest persistence models.
+
+The Hill function extensions planned for later sections (see [Model with different functional responses](#model-with-different-functional-responses)) provide a natural way to interpolate between the linear/saturating and binary ($n \to \infty$) regimes of stress response, and have been widely used in models of gene regulatory networks.
+
+# References
+
+Balaban, N. Q., Merrin, J., Chait, R., Kowalik, L., & Leibler, S. (2004). Bacterial persistence as a phenotypic switch. *Science*, 305(5690), 1622–1625. https://doi.org/10.1126/science.1099390
+
+Carja, O., Liberman, U., & Feldman, M. W. (2014). Evolution in changing environments: Modifiers of mutation, recombination, and migration. *PNAS*, 111(50), 17935–17940.
+
+Morawska, L. P., Hernandez-Valdes, J. A., & Kuipers, O. P. (2022). Diversity of bet-hedging strategies in microbial communities — Recent cases and insights. *WIREs Mechanisms of Disease*, 14(4), e1544. https://doi.org/10.1002/wsbm.1544
+
+Jia, C., Qian, M.-P., Kang, Y., & Jiang, D.-Q. (2014). Modeling stochastic phenotype switching and bet-hedging in bacteria: stochastic nonlinear dynamics and critical state identification. *Quantitative Biology*, 2(3), 110–125. https://doi.org/10.1007/s40484-014-0035-5
+
+Haas, P. A., Gutierrez, M. A., Oliveira, N. M., & Goldstein, R. E. (2022). Stabilization of microbial communities by responsive phenotypic switching. *Physical Review Research*, 4(3), 033224. https://doi.org/10.1103/PhysRevResearch.4.033224
+
+Veening, J. W., Smits, W. K., & Kuipers, O. P. (2008). Bistability, epigenetics, and bet-hedging in bacteria. *Annual Review of Microbiology*, 62, 193–210. https://doi.org/10.1146/annurev.micro.62.081307.163002
+
+Veening, J. W., Stewart, E. J., Berngruber, T. W., Taddei, F., Kuipers, O. P., & Hamoen, L. W. (2008). Bet-hedging and epigenetic inheritance in bacterial cell development. *PNAS*, 105(11), 4393–4398. https://doi.org/10.1073/pnas.0700463105
+
+Patra, P., & Klumpp, S. (2013). Population dynamics of bacterial persistence. *PLOS ONE*, 8(5), e62814. https://doi.org/10.1371/journal.pone.0062814
