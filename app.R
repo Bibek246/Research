@@ -9,16 +9,22 @@ library(htmltools)
 clip01 <- function(x) pmax(0, pmin(1, x))
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
+get_display_labels <- function(label_U = "U", label_M = "M") {
+  c(
+    U = ifelse(nchar(trimws(label_U)) == 0, "U", trimws(label_U)),
+    M = ifelse(nchar(trimws(label_M)) == 0, "M", trimws(label_M)),
+    total = "total"
+  )
+}
+
 stress_signal <- function(times, scenario, beta, period_hours, duty_cycle,
                           s_base, s_amp, forcing_period, rho50, hill_n) {
   if (scenario == "No stress") {
     tibble(time = times, stress_raw = 0, beta_eff = 0, rho = 0, iota = 0)
   } else if (scenario == "Periodic stress") {
-    # Rmd logic: iota <- ((t + delta.t) %/% period_hours) %% 2
     iota <- (((times) %/% period_hours) %% 2)
     tibble(time = times, stress_raw = iota, beta_eff = beta * iota, rho = iota, iota = iota)
   } else {
-    # Rmd-style continuous forcing
     stress <- sin((times) / (forcing_period / (2 * pi))) + 0.5
     stress <- pmax(stress, 0)
     rho <- ifelse(stress <= 0, 0, 1 / (1 + (rho50 / stress)^hill_n))
@@ -304,9 +310,8 @@ parameter_panel <- function(prefix = "", title = "Primary run", compare = FALSE)
   )
 }
 
-
 ui <- page_navbar(
-  title = div(style = "font-weight:700;", "Memory Dynamics Explorer v6"),
+  title = div(style = "font-weight:700;", "Memory Dynamics Explorer"),
   theme = bs_theme(
     version = 5,
     bootswatch = "flatly",
@@ -399,6 +404,12 @@ ui <- page_navbar(
         ),
         div(
           class = "control-block",
+          h5("State names"),
+          textInput("label_U", "Name for the unexposed state", value = "U"),
+          textInput("label_M", "Name for the memory state", value = "M")
+        ),
+        div(
+          class = "control-block",
           h5("Playback"),
           sliderInput("view_time", "Displayed time", min = 0, max = 120, value = 120, step = 0.5,
                       animate = animationOptions(interval = 350, loop = FALSE)),
@@ -458,7 +469,7 @@ ui <- page_navbar(
           ),
           nav_panel(
             "Phase portrait",
-            card(full_screen = TRUE, card_header("Phase portrait: U vs M"), card_body(plotOutput("phase_plot", height = "700px")))
+            card(full_screen = TRUE, card_header("Phase portrait"), card_body(plotOutput("phase_plot", height = "700px")))
           )
         )
       )
@@ -549,7 +560,6 @@ ui <- page_navbar(
   )
 )
 
-
 make_theme <- function() {
   theme_minimal(base_size = 15) +
     theme(
@@ -563,30 +573,65 @@ make_theme <- function() {
     )
 }
 
-plot_traj_gg <- function(dat, rs = NULL, view_time = NULL) {
-  long <- dat %>% select(time, U, M, total) %>%
+plot_traj_gg <- function(dat, rs = NULL, view_time = NULL,
+                         labels = c(U = "U", M = "M", total = "total")) {
+  
+  long <- dat %>%
+    select(time, U, M, total) %>%
     pivot_longer(cols = c(U, M, total), names_to = "state", values_to = "value") %>%
-    mutate(state = factor(state, levels = c("U", "M", "total")))
-  g <- ggplot() + make_theme() + labs(x = "Time (hours)", y = "Population fraction", color = NULL, fill = NULL)
+    mutate(
+      state = factor(state, levels = c("U", "M", "total")),
+      state_label = recode(as.character(state),
+                           U = labels["U"],
+                           M = labels["M"],
+                           total = labels["total"])
+    )
+  
+  g <- ggplot() +
+    make_theme() +
+    labs(x = "Time (hours)", y = "Population fraction", color = NULL, fill = NULL)
+  
   if (!is.null(rs)) {
     band_long <- bind_rows(
       rs %>% transmute(time, state = "U", lo = U_lo, hi = U_hi),
       rs %>% transmute(time, state = "M", lo = M_lo, hi = M_hi),
       rs %>% transmute(time, state = "total", lo = total_lo, hi = total_hi)
-    )
-    g <- g + geom_ribbon(data = band_long, aes(time, ymin = lo, ymax = hi, fill = state), alpha = 0.12)
+    ) %>%
+      mutate(
+        state = factor(state, levels = c("U", "M", "total")),
+        state_label = recode(as.character(state),
+                             U = labels["U"],
+                             M = labels["M"],
+                             total = labels["total"])
+      )
+    
+    g <- g +
+      geom_ribbon(
+        data = band_long,
+        aes(time, ymin = lo, ymax = hi, fill = state_label),
+        alpha = 0.12
+      ) +
+      scale_fill_manual(values = setNames(c("#2563eb", "#db2777", "#ca8a04"), labels))
   }
+  
   g +
-    geom_line(data = long, aes(time, value, color = state), linewidth = 1.15) +
-    scale_color_manual(values = c(U = "#2563eb", M = "#db2777", total = "#ca8a04")) +
-    scale_fill_manual(values = c(U = "#2563eb", M = "#db2777", total = "#ca8a04")) +
+    geom_line(data = long, aes(time, value, color = state_label), linewidth = 1.15) +
+    scale_color_manual(values = setNames(c("#2563eb", "#db2777", "#ca8a04"), labels)) +
     {if (!is.null(view_time)) geom_vline(xintercept = view_time, linetype = "dashed", color = "#475569")} +
     coord_cartesian(xlim = c(0, max(dat$time)), ylim = c(0, 1))
 }
 
-plot_frac_gg <- function(dat, rs = NULL, view_time = NULL, eq = NA_real_) {
-  g <- ggplot() + make_theme() + labs(x = "Time (hours)", y = "Memory fraction  M / (U + M)")
-  if (!is.null(rs)) g <- g + geom_ribbon(data = rs, aes(time, ymin = mem_lo, ymax = mem_hi), fill = "#10b981", alpha = 0.16)
+plot_frac_gg <- function(dat, rs = NULL, view_time = NULL, eq = NA_real_,
+                         labels = c(U = "U", M = "M")) {
+  g <- ggplot() +
+    make_theme() +
+    labs(x = "Time (hours)", y = paste0(labels["M"], " / (", labels["U"], " + ", labels["M"], ")"))
+  
+  if (!is.null(rs)) {
+    g <- g + geom_ribbon(data = rs, aes(time, ymin = mem_lo, ymax = mem_hi),
+                         fill = "#10b981", alpha = 0.16)
+  }
+  
   g +
     geom_line(data = dat, aes(time, memory_fraction), color = "#10b981", linewidth = 1.2) +
     geom_point(data = dat %>% slice_tail(n = 1), aes(time, memory_fraction), color = "#06b6d4", size = 2.8) +
@@ -607,14 +652,14 @@ plot_stress_gg <- function(dat, scenario, view_time = NULL) {
     labs(x = "Time (hours)", y = lab)
 }
 
-plot_phase_gg <- function(dat) {
+plot_phase_gg <- function(dat, labels = c(U = "U", M = "M")) {
   ggplot(dat, aes(U, M)) +
     geom_path(color = "#ef4444", linewidth = 1.2) +
     geom_point(data = dat %>% slice_head(n = 1), color = "#334155", size = 2.6) +
     geom_point(data = dat %>% slice_tail(n = 1), color = "#06b6d4", size = 3.2) +
     make_theme() +
     coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
-    labs(x = "U", y = "M")
+    labs(x = labels["U"], y = labels["M"])
 }
 
 server <- function(input, output, session) {
@@ -644,6 +689,10 @@ server <- function(input, output, session) {
       })
     })
   }
+  
+  display_labels <- reactive({
+    get_display_labels(input$label_U, input$label_M)
+  })
   
   primary_params <- reactive(build_params(input))
   compare_params_a <- reactive(build_params(input, "_a"))
@@ -691,27 +740,27 @@ server <- function(input, output, session) {
   output$traj_plot <- renderPlot({
     dat <- sim_data() %>% filter(time <= input$view_time)
     rs <- rep_summary()
-    print(plot_traj_gg(dat, rs, input$view_time))
+    print(plot_traj_gg(dat, rs, input$view_time, labels = display_labels()))
   }, res = 110)
   
   output$traj_plot_overview <- renderPlot({
     dat <- sim_data() %>% filter(time <= input$view_time)
     rs <- rep_summary()
-    print(plot_traj_gg(dat, rs, input$view_time))
+    print(plot_traj_gg(dat, rs, input$view_time, labels = display_labels()))
   }, res = 100)
   
   output$frac_plot <- renderPlot({
     dat <- sim_data() %>% filter(time <= input$view_time)
     rs <- rep_summary()
     eq <- calc_equilibrium(primary_params()$scenario, primary_params()$mu, primary_params()$eps, primary_params()$beta)
-    print(plot_frac_gg(dat, rs, input$view_time, eq))
+    print(plot_frac_gg(dat, rs, input$view_time, eq, labels = display_labels()))
   }, res = 110)
   
   output$frac_plot_overview <- renderPlot({
     dat <- sim_data() %>% filter(time <= input$view_time)
     rs <- rep_summary()
     eq <- calc_equilibrium(primary_params()$scenario, primary_params()$mu, primary_params()$eps, primary_params()$beta)
-    print(plot_frac_gg(dat, rs, input$view_time, eq))
+    print(plot_frac_gg(dat, rs, input$view_time, eq, labels = display_labels()))
   }, res = 100)
   
   output$stress_plot <- renderPlot({
@@ -726,7 +775,7 @@ server <- function(input, output, session) {
   
   output$phase_plot <- renderPlot({
     dat <- sim_data() %>% filter(time <= input$view_time)
-    print(plot_phase_gg(dat))
+    print(plot_phase_gg(dat, labels = display_labels()))
   }, res = 110)
   
   output$compare_frac_plot <- renderPlot({
@@ -737,19 +786,34 @@ server <- function(input, output, session) {
     g <- ggplot(dat, aes(time, memory_fraction, color = run)) +
       geom_line(linewidth = 1.2) +
       scale_color_manual(values = c("Run A" = "#2563eb", "Run B" = "#f59e0b")) +
-      make_theme() + labs(x = "Time (hours)", y = "Memory fraction", color = NULL)
+      make_theme() + 
+      labs(
+        x = "Time (hours)",
+        y = paste0(display_labels()["M"], " / (", display_labels()["U"], " + ", display_labels()["M"], ")"),
+        color = NULL
+      )
     print(g)
   }, res = 110)
   
   output$compare_state_plot <- renderPlot({
+    labels <- display_labels()
+    
     dat <- bind_rows(
       sim_a() %>% transmute(time, run = "Run A", U, M),
       sim_b() %>% transmute(time, run = "Run B", U, M)
-    ) %>% pivot_longer(cols = c(U, M), names_to = "state", values_to = "value")
+    ) %>%
+      pivot_longer(cols = c(U, M), names_to = "state", values_to = "value") %>%
+      mutate(
+        state = recode(state,
+                       U = labels["U"],
+                       M = labels["M"])
+      )
+    
     g <- ggplot(dat, aes(time, value, color = run, linetype = state)) +
       geom_line(linewidth = 1.1) +
       scale_color_manual(values = c("Run A" = "#2563eb", "Run B" = "#f59e0b")) +
-      make_theme() + labs(x = "Time (hours)", y = "Population fraction", color = NULL, linetype = NULL)
+      make_theme() + 
+      labs(x = "Time (hours)", y = "Population fraction", color = NULL, linetype = NULL)
     print(g)
   }, res = 110)
   
@@ -782,29 +846,59 @@ server <- function(input, output, session) {
   output$download_traj <- downloadHandler(
     filename = function() paste0("memory_trajectory_", Sys.Date(), ".png"),
     content = function(file) {
+      labels <- display_labels()
       dat <- sim_data()
       rs <- rep_summary()
-      long <- dat %>% select(time, U, M, total) %>% pivot_longer(cols = c(U, M, total), names_to = "state", values_to = "value") %>%
-        mutate(state = factor(state, levels = c("U", "M", "total")))
-      g <- ggplot() + theme_minimal(base_size = 14) +
-        theme(plot.background = element_rect(fill = "#111827", color = NA),
-              panel.background = element_rect(fill = "#111827", color = NA),
-              legend.position = "top", text = element_text(color = "white"),
-              axis.text = element_text(color = "white"), axis.title = element_text(color = "white"),
-              legend.text = element_text(color = "white"), legend.title = element_text(color = "white"))
+      
+      long <- dat %>%
+        select(time, U, M, total) %>%
+        pivot_longer(cols = c(U, M, total), names_to = "state", values_to = "value") %>%
+        mutate(
+          state = factor(state, levels = c("U", "M", "total")),
+          state_label = recode(as.character(state),
+                               U = labels["U"],
+                               M = labels["M"],
+                               total = labels["total"])
+        )
+      
+      g <- ggplot() +
+        theme_minimal(base_size = 14) +
+        theme(
+          plot.background = element_rect(fill = "#111827", color = NA),
+          panel.background = element_rect(fill = "#111827", color = NA),
+          legend.position = "top",
+          text = element_text(color = "white"),
+          axis.text = element_text(color = "white"),
+          axis.title = element_text(color = "white"),
+          legend.text = element_text(color = "white"),
+          legend.title = element_text(color = "white")
+        )
+      
       if (!is.null(rs)) {
         band_long <- bind_rows(
           rs %>% transmute(time, state = "U", lo = U_lo, hi = U_hi),
           rs %>% transmute(time, state = "M", lo = M_lo, hi = M_hi),
           rs %>% transmute(time, state = "total", lo = total_lo, hi = total_hi)
-        )
-        g <- g + geom_ribbon(data = band_long, aes(time, ymin = lo, ymax = hi, fill = state), alpha = 0.12)
+        ) %>%
+          mutate(
+            state = factor(state, levels = c("U", "M", "total")),
+            state_label = recode(as.character(state),
+                                 U = labels["U"],
+                                 M = labels["M"],
+                                 total = labels["total"])
+          )
+        
+        g <- g +
+          geom_ribbon(data = band_long, aes(time, ymin = lo, ymax = hi, fill = state_label), alpha = 0.12) +
+          scale_fill_manual(values = setNames(c("#60a5fa", "#f472b6", "#facc15"), labels))
       }
-      g <- g + geom_line(data = long, aes(time, value, color = state), linewidth = 1.15) +
-        scale_color_manual(values = c(U = "#60a5fa", M = "#f472b6", total = "#facc15")) +
-        scale_fill_manual(values = c(U = "#60a5fa", M = "#f472b6", total = "#facc15")) +
+      
+      g <- g +
+        geom_line(data = long, aes(time, value, color = state_label), linewidth = 1.15) +
+        scale_color_manual(values = setNames(c("#60a5fa", "#f472b6", "#facc15"), labels)) +
         coord_cartesian(xlim = c(0, max(dat$time)), ylim = c(0, 1)) +
         labs(x = "Time (hours)", y = "Population fraction", color = NULL, fill = NULL)
+      
       ggsave(file, g, width = 10, height = 6, dpi = 300, bg = "#111827")
     }
   )
@@ -812,16 +906,26 @@ server <- function(input, output, session) {
   output$download_frac <- downloadHandler(
     filename = function() paste0("memory_fraction_", Sys.Date(), ".png"),
     content = function(file) {
+      labels <- display_labels()
       dat <- sim_data()
       rs <- rep_summary()
-      g <- ggplot() + theme_minimal(base_size = 14) +
-        theme(plot.background = element_rect(fill = "#111827", color = NA),
-              panel.background = element_rect(fill = "#111827", color = NA),
-              text = element_text(color = "white"), axis.text = element_text(color = "white"), axis.title = element_text(color = "white"))
-      if (!is.null(rs)) g <- g + geom_ribbon(data = rs, aes(time, ymin = mem_lo, ymax = mem_hi), fill = "#34d399", alpha = 0.16)
-      g <- g + geom_line(data = dat, aes(time, memory_fraction), color = "#34d399", linewidth = 1.2) +
+      g <- ggplot() +
+        theme_minimal(base_size = 14) +
+        theme(
+          plot.background = element_rect(fill = "#111827", color = NA),
+          panel.background = element_rect(fill = "#111827", color = NA),
+          text = element_text(color = "white"),
+          axis.text = element_text(color = "white"),
+          axis.title = element_text(color = "white")
+        )
+      if (!is.null(rs)) {
+        g <- g + geom_ribbon(data = rs, aes(time, ymin = mem_lo, ymax = mem_hi), fill = "#34d399", alpha = 0.16)
+      }
+      g <- g +
+        geom_line(data = dat, aes(time, memory_fraction), color = "#34d399", linewidth = 1.2) +
         coord_cartesian(xlim = c(0, max(dat$time)), ylim = c(0, 1)) +
-        labs(x = "Time (hours)", y = "Memory fraction")
+        labs(x = "Time (hours)", y = paste0(labels["M"], " / (", labels["U"], " + ", labels["M"], ")"))
+      
       ggsave(file, g, width = 9, height = 5.5, dpi = 300, bg = "#111827")
     }
   )
