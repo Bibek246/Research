@@ -14,3 +14,7 @@ Interactive Shiny app for exploring a two-state microbial memory model based on 
 install.packages(c("shiny", "bslib", "ggplot2", "dplyr", "tidyr", "scales", "htmltools"))
 shiny::runApp("app.R")
 ```
+
+Use this link to access the website:
+
+https://research12.shinyapps.io/research/
