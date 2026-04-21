@@ -233,17 +233,6 @@ apply_preset <- function(session, spec, suffix = "") {
   upd_num("seed", 123)
 }
 
-kpi_card <- function(title, value_output, subtitle = NULL) {
-  card(
-    class = "border-0 shadow-sm bg-white bg-opacity-10",
-    card_body(
-      div(style = "font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; opacity: .8;", title),
-      div(textOutput(value_output), style = "font-size: 1.5rem; font-weight: 700; line-height: 1.1;"),
-      if (!is.null(subtitle)) div(subtitle, style = "font-size: .78rem; opacity: .8;")
-    )
-  )
-}
-
 scenario_controls <- function(prefix = "") {
   tagList(
     conditionalPanel(
@@ -379,7 +368,6 @@ ui <- page_navbar(
       padding-top: .5rem;
     }
   "))),
-  
   nav_panel(
     "Simulator",
     div(
@@ -475,7 +463,6 @@ ui <- page_navbar(
       )
     )
   ),
-  
   nav_panel(
     "Compare runs",
     div(class = "app-hero", h3("Side-by-side comparison"), p("Run A and Run B stay available, but the plots are separated into tabs so each one has room to breathe.")),
@@ -504,7 +491,6 @@ ui <- page_navbar(
       )
     )
   ),
-  
   nav_panel(
     "Inference placeholder",
     card(
@@ -530,7 +516,6 @@ ui <- page_navbar(
       )
     )
   ),
-  
   nav_panel(
     "Equations & notes",
     card(
@@ -576,26 +561,15 @@ make_theme <- function() {
 plot_traj_gg <- function(dat, rs = NULL, view_time = NULL,
                          labels = c(U = "U", M = "M", total = "total")) {
   
-  long <- dat %>%
-    select(time, U, M, total) %>%
-    pivot_longer(cols = c(U, M, total), names_to = "state", values_to = "value") %>%
-    mutate(
-      state = factor(state, levels = c("U", "M", "total")),
-      state_label = recode(as.character(state),
-                           U = labels["U"],
-                           M = labels["M"],
-                           total = labels["total"])
-    )
-  
   g <- ggplot() +
     make_theme() +
     labs(x = "Time (hours)", y = "Population fraction", color = NULL, fill = NULL)
   
   if (!is.null(rs)) {
     band_long <- bind_rows(
-      rs %>% transmute(time, state = "U", lo = U_lo, hi = U_hi),
-      rs %>% transmute(time, state = "M", lo = M_lo, hi = M_hi),
-      rs %>% transmute(time, state = "total", lo = total_lo, hi = total_hi)
+      rs %>% transmute(time, state = "U", lo = U_lo, hi = U_hi, med = U_med),
+      rs %>% transmute(time, state = "M", lo = M_lo, hi = M_hi, med = M_med),
+      rs %>% transmute(time, state = "total", lo = total_lo, hi = total_hi, med = total_med)
     ) %>%
       mutate(
         state = factor(state, levels = c("U", "M", "total")),
@@ -611,30 +585,59 @@ plot_traj_gg <- function(dat, rs = NULL, view_time = NULL,
         aes(time, ymin = lo, ymax = hi, fill = state_label),
         alpha = 0.12
       ) +
-      scale_fill_manual(values = setNames(c("#2563eb", "#db2777", "#ca8a04"), labels))
+      geom_line(
+        data = band_long,
+        aes(time, med, color = state_label),
+        linewidth = 1.15
+      ) +
+      scale_fill_manual(values = setNames(c("#2563eb", "#db2777", "#ca8a04"), labels)) +
+      scale_color_manual(values = setNames(c("#2563eb", "#db2777", "#ca8a04"), labels))
+  } else {
+    long <- dat %>%
+      select(time, U, M, total) %>%
+      pivot_longer(cols = c(U, M, total), names_to = "state", values_to = "value") %>%
+      mutate(
+        state = factor(state, levels = c("U", "M", "total")),
+        state_label = recode(as.character(state),
+                             U = labels["U"],
+                             M = labels["M"],
+                             total = labels["total"])
+      )
+    
+    g <- g +
+      geom_line(data = long, aes(time, value, color = state_label), linewidth = 1.15) +
+      scale_color_manual(values = setNames(c("#2563eb", "#db2777", "#ca8a04"), labels))
   }
   
   g +
-    geom_line(data = long, aes(time, value, color = state_label), linewidth = 1.15) +
-    scale_color_manual(values = setNames(c("#2563eb", "#db2777", "#ca8a04"), labels)) +
     {if (!is.null(view_time)) geom_vline(xintercept = view_time, linetype = "dashed", color = "#475569")} +
     coord_cartesian(xlim = c(0, max(dat$time)), ylim = c(0, 1))
 }
 
 plot_frac_gg <- function(dat, rs = NULL, view_time = NULL, eq = NA_real_,
                          labels = c(U = "U", M = "M")) {
+  
   g <- ggplot() +
     make_theme() +
     labs(x = "Time (hours)", y = paste0(labels["M"], " / (", labels["U"], " + ", labels["M"], ")"))
   
   if (!is.null(rs)) {
-    g <- g + geom_ribbon(data = rs, aes(time, ymin = mem_lo, ymax = mem_hi),
-                         fill = "#10b981", alpha = 0.16)
+    g <- g +
+      geom_ribbon(data = rs, aes(time, ymin = mem_lo, ymax = mem_hi),
+                  fill = "#10b981", alpha = 0.16) +
+      geom_line(data = rs, aes(time, mem_med),
+                color = "#10b981", linewidth = 1.2) +
+      geom_point(data = rs %>% slice_tail(n = 1), aes(time, mem_med),
+                 color = "#06b6d4", size = 2.8)
+  } else {
+    g <- g +
+      geom_line(data = dat, aes(time, memory_fraction),
+                color = "#10b981", linewidth = 1.2) +
+      geom_point(data = dat %>% slice_tail(n = 1), aes(time, memory_fraction),
+                 color = "#06b6d4", size = 2.8)
   }
   
   g +
-    geom_line(data = dat, aes(time, memory_fraction), color = "#10b981", linewidth = 1.2) +
-    geom_point(data = dat %>% slice_tail(n = 1), aes(time, memory_fraction), color = "#06b6d4", size = 2.8) +
     {if (!is.na(eq)) geom_hline(yintercept = eq, linetype = "dotted", color = "#f59e0b", linewidth = 1)} +
     {if (!is.null(view_time)) geom_vline(xintercept = view_time, linetype = "dashed", color = "#475569")} +
     coord_cartesian(xlim = c(0, max(dat$time)), ylim = c(0, 1))
@@ -740,18 +743,21 @@ server <- function(input, output, session) {
   output$traj_plot <- renderPlot({
     dat <- sim_data() %>% filter(time <= input$view_time)
     rs <- rep_summary()
+    if (!is.null(rs)) rs <- rs %>% filter(time <= input$view_time)
     print(plot_traj_gg(dat, rs, input$view_time, labels = display_labels()))
   }, res = 110)
   
   output$traj_plot_overview <- renderPlot({
     dat <- sim_data() %>% filter(time <= input$view_time)
     rs <- rep_summary()
+    if (!is.null(rs)) rs <- rs %>% filter(time <= input$view_time)
     print(plot_traj_gg(dat, rs, input$view_time, labels = display_labels()))
   }, res = 100)
   
   output$frac_plot <- renderPlot({
     dat <- sim_data() %>% filter(time <= input$view_time)
     rs <- rep_summary()
+    if (!is.null(rs)) rs <- rs %>% filter(time <= input$view_time)
     eq <- calc_equilibrium(primary_params()$scenario, primary_params()$mu, primary_params()$eps, primary_params()$beta)
     print(plot_frac_gg(dat, rs, input$view_time, eq, labels = display_labels()))
   }, res = 110)
@@ -759,6 +765,7 @@ server <- function(input, output, session) {
   output$frac_plot_overview <- renderPlot({
     dat <- sim_data() %>% filter(time <= input$view_time)
     rs <- rep_summary()
+    if (!is.null(rs)) rs <- rs %>% filter(time <= input$view_time)
     eq <- calc_equilibrium(primary_params()$scenario, primary_params()$mu, primary_params()$eps, primary_params()$beta)
     print(plot_frac_gg(dat, rs, input$view_time, eq, labels = display_labels()))
   }, res = 100)
@@ -786,7 +793,7 @@ server <- function(input, output, session) {
     g <- ggplot(dat, aes(time, memory_fraction, color = run)) +
       geom_line(linewidth = 1.2) +
       scale_color_manual(values = c("Run A" = "#2563eb", "Run B" = "#f59e0b")) +
-      make_theme() + 
+      make_theme() +
       labs(
         x = "Time (hours)",
         y = paste0(display_labels()["M"], " / (", display_labels()["U"], " + ", display_labels()["M"], ")"),
@@ -812,7 +819,7 @@ server <- function(input, output, session) {
     g <- ggplot(dat, aes(time, value, color = run, linetype = state)) +
       geom_line(linewidth = 1.1) +
       scale_color_manual(values = c("Run A" = "#2563eb", "Run B" = "#f59e0b")) +
-      make_theme() + 
+      make_theme() +
       labs(x = "Time (hours)", y = "Population fraction", color = NULL, linetype = NULL)
     print(g)
   }, res = 110)
@@ -850,17 +857,6 @@ server <- function(input, output, session) {
       dat <- sim_data()
       rs <- rep_summary()
       
-      long <- dat %>%
-        select(time, U, M, total) %>%
-        pivot_longer(cols = c(U, M, total), names_to = "state", values_to = "value") %>%
-        mutate(
-          state = factor(state, levels = c("U", "M", "total")),
-          state_label = recode(as.character(state),
-                               U = labels["U"],
-                               M = labels["M"],
-                               total = labels["total"])
-        )
-      
       g <- ggplot() +
         theme_minimal(base_size = 14) +
         theme(
@@ -876,9 +872,9 @@ server <- function(input, output, session) {
       
       if (!is.null(rs)) {
         band_long <- bind_rows(
-          rs %>% transmute(time, state = "U", lo = U_lo, hi = U_hi),
-          rs %>% transmute(time, state = "M", lo = M_lo, hi = M_hi),
-          rs %>% transmute(time, state = "total", lo = total_lo, hi = total_hi)
+          rs %>% transmute(time, state = "U", lo = U_lo, hi = U_hi, med = U_med),
+          rs %>% transmute(time, state = "M", lo = M_lo, hi = M_hi, med = M_med),
+          rs %>% transmute(time, state = "total", lo = total_lo, hi = total_hi, med = total_med)
         ) %>%
           mutate(
             state = factor(state, levels = c("U", "M", "total")),
@@ -890,12 +886,27 @@ server <- function(input, output, session) {
         
         g <- g +
           geom_ribbon(data = band_long, aes(time, ymin = lo, ymax = hi, fill = state_label), alpha = 0.12) +
-          scale_fill_manual(values = setNames(c("#60a5fa", "#f472b6", "#facc15"), labels))
+          geom_line(data = band_long, aes(time, med, color = state_label), linewidth = 1.15) +
+          scale_fill_manual(values = setNames(c("#60a5fa", "#f472b6", "#facc15"), labels)) +
+          scale_color_manual(values = setNames(c("#60a5fa", "#f472b6", "#facc15"), labels))
+      } else {
+        long <- dat %>%
+          select(time, U, M, total) %>%
+          pivot_longer(cols = c(U, M, total), names_to = "state", values_to = "value") %>%
+          mutate(
+            state = factor(state, levels = c("U", "M", "total")),
+            state_label = recode(as.character(state),
+                                 U = labels["U"],
+                                 M = labels["M"],
+                                 total = labels["total"])
+          )
+        
+        g <- g +
+          geom_line(data = long, aes(time, value, color = state_label), linewidth = 1.15) +
+          scale_color_manual(values = setNames(c("#60a5fa", "#f472b6", "#facc15"), labels))
       }
       
       g <- g +
-        geom_line(data = long, aes(time, value, color = state_label), linewidth = 1.15) +
-        scale_color_manual(values = setNames(c("#60a5fa", "#f472b6", "#facc15"), labels)) +
         coord_cartesian(xlim = c(0, max(dat$time)), ylim = c(0, 1)) +
         labs(x = "Time (hours)", y = "Population fraction", color = NULL, fill = NULL)
       
@@ -918,11 +929,17 @@ server <- function(input, output, session) {
           axis.text = element_text(color = "white"),
           axis.title = element_text(color = "white")
         )
+      
       if (!is.null(rs)) {
-        g <- g + geom_ribbon(data = rs, aes(time, ymin = mem_lo, ymax = mem_hi), fill = "#34d399", alpha = 0.16)
+        g <- g +
+          geom_ribbon(data = rs, aes(time, ymin = mem_lo, ymax = mem_hi), fill = "#34d399", alpha = 0.16) +
+          geom_line(data = rs, aes(time, mem_med), color = "#34d399", linewidth = 1.2)
+      } else {
+        g <- g +
+          geom_line(data = dat, aes(time, memory_fraction), color = "#34d399", linewidth = 1.2)
       }
+      
       g <- g +
-        geom_line(data = dat, aes(time, memory_fraction), color = "#34d399", linewidth = 1.2) +
         coord_cartesian(xlim = c(0, max(dat$time)), ylim = c(0, 1)) +
         labs(x = "Time (hours)", y = paste0(labels["M"], " / (", labels["U"], " + ", labels["M"], ")"))
       
