@@ -8,3 +8,4 @@ rsconnect/
 renv/library/
 renv/staging/
 .Renviron
+.positai
